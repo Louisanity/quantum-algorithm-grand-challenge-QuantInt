@@ -38,7 +38,7 @@ class ADAPT_VQE:
         self.hardware_type = "it"
         self.optimizer: Adam = None
         self.params = np.asarray([])
-        self.estimate_result = 0.0
+        self.estimate_result = float("inf")
 
     def init_fermion_pool(self, orbitalNumber):
         singlet_gsd = []
@@ -233,10 +233,12 @@ class ADAPT_VQE:
                 opt_state = self.optimizer.get_init_state(self.params)
                 opt_state = self.optimizer.step(opt_state, self.cost_fn, self.g_fn)
                 self.params = opt_state.params
-                self.estimate_result = opt_state.cost
                 n_iter += 1
                 print(f"iteration {n_iter}")
                 print(opt_state.cost)
+                if opt_state.cost < self.estimate_result:
+                    self.estimate_result = opt_state.cost
+                    print("Update estimate result")
             except TimeExceededError:
                 return
 
@@ -252,10 +254,10 @@ class RunAlgorithm:
         return energy_final, qc_time_final
 
     def get_result(self) -> float:
-        n_site = 2
+        n_site = 4
         n_qubits = 2 * n_site
         ham = load_operator(
-            file_name=f"{n_qubits}_qubits_H_5",
+            file_name=f"{n_qubits}_qubits_H_3",
             data_directory="../hamiltonian/hamiltonian_samples",
             plain_text=False,
         )
