@@ -259,8 +259,8 @@ class RunAlgorithm:
             data_directory="../hamiltonian/hamiltonian_samples",
             plain_text=False,
         )
-        bk_hamiltonian = jordan_wigner(ham)
-        hamiltonian = operator_from_openfermion_op(bk_hamiltonian)
+        jw_hamiltonian = jordan_wigner(ham)
+        hamiltonian = operator_from_openfermion_op(jw_hamiltonian)
 
         adapt_vqe = ADAPT_VQE(hamiltonian, n_qubits)
         adapt_vqe.prepare()
