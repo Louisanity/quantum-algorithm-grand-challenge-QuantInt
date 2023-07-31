@@ -7,7 +7,6 @@ from openfermion.transforms import jordan_wigner, normal_ordered
 from openfermion.utils import load_operator, hermitian_conjugated
 from openfermion.ops.operators.fermion_operator import FermionOperator
 from quri_parts.algo.optimizer import Adam
-from quri_parts.algo.optimizer.adam import OptimizerStateAdam
 from quri_parts.circuit import QuantumGate, UnboundParametricQuantumCircuit
 from quri_parts.core.estimator import ConcurrentParametricQuantumEstimator
 from quri_parts.core.estimator.gradient import parameter_shift_gradient_estimates
@@ -15,7 +14,6 @@ from quri_parts.core.measurement import bitwise_commuting_pauli_measurement
 from quri_parts.core.operator import Operator, SinglePauli, PauliLabel, PAULI_IDENTITY
 from quri_parts.core.sampling.shots_allocator import create_equipartition_shots_allocator
 from quri_parts.core.state import ComputationalBasisState, ParametricCircuitQuantumState
-from quri_parts.core.utils.array import readonly_array
 from quri_parts.openfermion.operator import operator_from_openfermion_op
 
 sys.path.append("../")
@@ -182,12 +180,12 @@ class ADAPT_VQE:
         self.params = []
         self.construct_parametric_circuit()
         self.parametric_state = ParametricCircuitQuantumState(self.n_qubits, self.ansatz_circuit)
-        self.optimizer = Adam(betas=(np.sqrt(0.9), np.sqrt(0.999)))
+        self.optimizer = Adam()
 
     def get_operator_gradient(self, index, qc_type):
         n_shots = self.combined_operators_len[index]
         if qc_type == "sc":
-            n_shots *= 10
+            n_shots *= 100
         op_grad_estimator = challenge_sampling.create_parametric_sampling_estimator(
             n_shots, self.measurement_factory, self.shots_allocator, qc_type
         )
@@ -251,7 +249,6 @@ class ADAPT_VQE:
 
     def run(self):
         n_iter = 0
-        last_cost = 0.0
         while True:
             try:
                 print(f"STEP 1: {challenge_sampling.total_quantum_circuit_time}")
@@ -262,22 +259,12 @@ class ADAPT_VQE:
                 self.construct_parametric_circuit()
                 self.parametric_state = ParametricCircuitQuantumState(self.n_qubits, self.ansatz_circuit)
                 self.params = np.append(self.params, 0.0)
-                if n_iter == 0:
-                    last_cost = self.cost_fn(self.params)
-                zeros = readonly_array(np.zeros(len(self.params), dtype=float))
-                opt_state = OptimizerStateAdam(
-                    params=readonly_array(self.params),
-                    niter=1,
-                    cost=last_cost,
-                    m=zeros,
-                    v=zeros,
-                )
+                opt_state = self.optimizer.get_init_state(self.params)
                 opt_state = self.optimizer.step(opt_state, self.cost_fn, self.g_fn)
                 print(f"STEP 3: {challenge_sampling.total_quantum_circuit_time}")
                 self.params = opt_state.params
                 n_iter += 1
                 print(f"iteration {n_iter}")
-                last_cost = opt_state.cost
                 print(opt_state.cost)
                 if opt_state.cost < self.estimate_result:
                     self.estimate_result = opt_state.cost
@@ -300,7 +287,7 @@ class RunAlgorithm:
         n_site = 4
         n_qubits = 2 * n_site
         ham = load_operator(
-            file_name=f"{n_qubits}_qubits_H_1",
+            file_name=f"{n_qubits}_qubits_H_3",
             data_directory="../hamiltonian/hamiltonian_samples",
             plain_text=False,
         )
