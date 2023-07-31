@@ -6,13 +6,16 @@ from openfermion import QubitOperator
 from openfermion.transforms import jordan_wigner, normal_ordered
 from openfermion.utils import load_operator, hermitian_conjugated
 from openfermion.ops.operators.fermion_operator import FermionOperator
-from quri_parts.algo.optimizer import NFT
+from quri_parts.algo.optimizer import Adam
+from quri_parts.algo.optimizer.adam import OptimizerStateAdam
 from quri_parts.circuit import QuantumGate, UnboundParametricQuantumCircuit
-from quri_parts.core.estimator import ParametricQuantumEstimator
+from quri_parts.core.estimator import ConcurrentParametricQuantumEstimator
+from quri_parts.core.estimator.gradient import parameter_shift_gradient_estimates
 from quri_parts.core.measurement import bitwise_commuting_pauli_measurement
 from quri_parts.core.operator import Operator, SinglePauli, PauliLabel, PAULI_IDENTITY
 from quri_parts.core.sampling.shots_allocator import create_equipartition_shots_allocator
 from quri_parts.core.state import ComputationalBasisState, ParametricCircuitQuantumState
+from quri_parts.core.utils.array import readonly_array
 from quri_parts.openfermion.operator import operator_from_openfermion_op
 
 sys.path.append("../")
@@ -33,10 +36,10 @@ class ADAPT_VQE:
         self.ansatz_operators: list[Operator] = []
         self.ansatz_circuit: UnboundParametricQuantumCircuit = None
         self.hf_gates: Sequence[QuantumGate] = None
-        self.sampling_estimator: ParametricQuantumEstimator[ParametricCircuitQuantumState] = None
+        self.sampling_estimator: ConcurrentParametricQuantumEstimator[ParametricCircuitQuantumState] = None
         self.hamiltonian = hamiltonian
         self.n_qubits = n_qubits
-        self.optimizer: NFT = None
+        self.optimizer: Adam = None
         self.params = np.asarray([])
         self.estimate_result = float("inf")
 
@@ -172,14 +175,14 @@ class ADAPT_VQE:
         measurements = self.measurement_factory(self.hamiltonian)
         measurements = [m for m in measurements if m.pauli_set != {PAULI_IDENTITY}]
         pauli_sets = tuple(m.pauli_set for m in measurements)
-        self.sampling_estimator = challenge_sampling.create_parametric_sampling_estimator(
+        self.sampling_estimator = challenge_sampling.create_concurrent_parametric_sampling_estimator(
             len(pauli_sets) * 12, self.measurement_factory,
             self.shots_allocator, "it"
         )
         self.params = []
         self.construct_parametric_circuit()
         self.parametric_state = ParametricCircuitQuantumState(self.n_qubits, self.ansatz_circuit)
-        self.optimizer = NFT(randomize=True)
+        self.optimizer = Adam(betas=(np.sqrt(0.9), np.sqrt(0.999)))
 
     def get_operator_gradient(self, index, qc_type):
         n_shots = self.combined_operators_len[index]
@@ -236,9 +239,15 @@ class ADAPT_VQE:
 
     def cost_fn(self, param_values):
         estimate = self.sampling_estimator(
-            self.hamiltonian, self.parametric_state, param_values
+            self.hamiltonian, self.parametric_state, [param_values]
         )
-        return estimate.value.real
+        return estimate[0].value.real
+
+    def g_fn(self, param_values):
+        grad = parameter_shift_gradient_estimates(
+            self.hamiltonian, self.parametric_state, param_values, self.sampling_estimator
+        )
+        return np.asarray([i.real for i in grad.values])
 
     def run(self):
         n_iter = 0
@@ -253,14 +262,22 @@ class ADAPT_VQE:
                 self.construct_parametric_circuit()
                 self.parametric_state = ParametricCircuitQuantumState(self.n_qubits, self.ansatz_circuit)
                 self.params = np.append(self.params, 0.0)
-                opt_state = self.optimizer.get_init_state(self.params)
-                opt_state = self.optimizer.step(opt_state, self.cost_fn)
+                if n_iter == 0:
+                    last_cost = self.cost_fn(self.params)
+                zeros = readonly_array(np.zeros(len(self.params), dtype=float))
+                opt_state = OptimizerStateAdam(
+                    params=readonly_array(self.params),
+                    niter=1,
+                    cost=last_cost,
+                    m=zeros,
+                    v=zeros,
+                )
+                opt_state = self.optimizer.step(opt_state, self.cost_fn, self.g_fn)
                 print(f"STEP 3: {challenge_sampling.total_quantum_circuit_time}")
                 self.params = opt_state.params
                 n_iter += 1
                 print(f"iteration {n_iter}")
-                last_cost = self.cost_fn(self.params)
-                print(last_cost)
+                last_cost = opt_state.cost
                 print(opt_state.cost)
                 if opt_state.cost < self.estimate_result:
                     self.estimate_result = opt_state.cost

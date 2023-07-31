@@ -8,8 +8,7 @@ from openfermion.utils import load_operator, hermitian_conjugated
 from openfermion.ops.operators.fermion_operator import FermionOperator
 from quri_parts.algo.optimizer import NFT
 from quri_parts.circuit import QuantumGate, UnboundParametricQuantumCircuit
-from quri_parts.core.estimator import ConcurrentParametricQuantumEstimator
-from quri_parts.core.estimator.gradient import parameter_shift_gradient_estimates
+from quri_parts.core.estimator import ParametricQuantumEstimator
 from quri_parts.core.measurement import bitwise_commuting_pauli_measurement
 from quri_parts.core.operator import Operator, SinglePauli, PauliLabel, PAULI_IDENTITY
 from quri_parts.core.sampling.shots_allocator import create_equipartition_shots_allocator
@@ -34,7 +33,7 @@ class ADAPT_VQE:
         self.ansatz_operators: list[Operator] = []
         self.ansatz_circuit: UnboundParametricQuantumCircuit = None
         self.hf_gates: Sequence[QuantumGate] = None
-        self.sampling_estimator: ConcurrentParametricQuantumEstimator[ParametricCircuitQuantumState] = None
+        self.sampling_estimator: ParametricQuantumEstimator[ParametricCircuitQuantumState] = None
         self.hamiltonian = hamiltonian
         self.n_qubits = n_qubits
         self.optimizer: NFT = None
@@ -173,7 +172,7 @@ class ADAPT_VQE:
         measurements = self.measurement_factory(self.hamiltonian)
         measurements = [m for m in measurements if m.pauli_set != {PAULI_IDENTITY}]
         pauli_sets = tuple(m.pauli_set for m in measurements)
-        self.sampling_estimator = challenge_sampling.create_concurrent_parametric_sampling_estimator(
+        self.sampling_estimator = challenge_sampling.create_parametric_sampling_estimator(
             len(pauli_sets) * 12, self.measurement_factory,
             self.shots_allocator, "it"
         )
@@ -182,21 +181,23 @@ class ADAPT_VQE:
         self.parametric_state = ParametricCircuitQuantumState(self.n_qubits, self.ansatz_circuit)
         self.optimizer = NFT(randomize=True)
 
-    def get_operator_gradient(self, index):
+    def get_operator_gradient(self, index, qc_type):
+        n_shots = self.combined_operators_len[index]
+        if qc_type == "sc":
+            n_shots *= 10
         op_grad_estimator = challenge_sampling.create_parametric_sampling_estimator(
-            self.combined_operators_len[index] * 10,
-            self.measurement_factory, self.shots_allocator, "sc"
+            n_shots, self.measurement_factory, self.shots_allocator, qc_type
         )
         est_value = op_grad_estimator(
             self.combined_operators[index], self.parametric_state, self.params
         )
         return 2 * est_value.value.real
 
-    def select_operator(self) -> Operator:
+    def select_operator(self, qc_type) -> Operator:
         selected_gradient_abs = 0
         selected_index = None
         for i in range(len(self.qubit_pool)):
-            gradient_abs = np.abs(self.get_operator_gradient(i))
+            gradient_abs = np.abs(self.get_operator_gradient(i, qc_type))
             if gradient_abs > selected_gradient_abs:
                 selected_gradient_abs = gradient_abs
                 selected_index = i
@@ -234,32 +235,32 @@ class ADAPT_VQE:
                         self.ansatz_circuit.add_RX_gate(index, -np.pi / 2)
 
     def cost_fn(self, param_values):
-        estimate = self.sampling_estimator(self.hamiltonian, self.parametric_state, [param_values])
-        return estimate[0].value.real
-
-    def g_fn(self, param_values):
-        grad = parameter_shift_gradient_estimates(
-            self.hamiltonian, self.parametric_state, param_values, self.sampling_estimator
+        estimate = self.sampling_estimator(
+            self.hamiltonian, self.parametric_state, param_values
         )
-        return np.asarray([i.real for i in grad.values])
+        return estimate.value.real
 
     def run(self):
         n_iter = 0
+        last_cost = 0.0
         while True:
             try:
                 print(f"STEP 1: {challenge_sampling.total_quantum_circuit_time}")
-                selected_operator = self.select_operator()
+                qc_type = "sc" if n_iter < 2 else "it"
+                selected_operator = self.select_operator(qc_type)
                 print(f"STEP 2: {challenge_sampling.total_quantum_circuit_time}")
                 self.ansatz_operators.append(selected_operator)
                 self.construct_parametric_circuit()
                 self.parametric_state = ParametricCircuitQuantumState(self.n_qubits, self.ansatz_circuit)
                 self.params = np.append(self.params, 0.0)
                 opt_state = self.optimizer.get_init_state(self.params)
-                opt_state = self.optimizer.step(opt_state, self.cost_fn, self.g_fn)
+                opt_state = self.optimizer.step(opt_state, self.cost_fn)
                 print(f"STEP 3: {challenge_sampling.total_quantum_circuit_time}")
                 self.params = opt_state.params
                 n_iter += 1
                 print(f"iteration {n_iter}")
+                last_cost = self.cost_fn(self.params)
+                print(last_cost)
                 print(opt_state.cost)
                 if opt_state.cost < self.estimate_result:
                     self.estimate_result = opt_state.cost
