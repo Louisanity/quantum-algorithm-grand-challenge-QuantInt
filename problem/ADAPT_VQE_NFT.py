@@ -242,7 +242,6 @@ class ADAPT_VQE:
 
     def run(self):
         n_iter = 0
-        last_cost = 0.0
         while True:
             try:
                 print(f"STEP 1: {challenge_sampling.total_quantum_circuit_time}")
@@ -259,8 +258,6 @@ class ADAPT_VQE:
                 self.params = opt_state.params
                 n_iter += 1
                 print(f"iteration {n_iter}")
-                last_cost = self.cost_fn(self.params)
-                print(last_cost)
                 print(opt_state.cost)
                 if opt_state.cost < self.estimate_result:
                     self.estimate_result = opt_state.cost
